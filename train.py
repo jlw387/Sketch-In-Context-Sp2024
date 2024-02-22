@@ -9,14 +9,21 @@ import pickle
 import torch
 from torch.utils.data import DataLoader
 
+from matplotlib import pyplot as plt
+
 import dataset as dataset
 from MegaNet.network import SketchToSDF, VariationalSketchPretrainer
+from plotReprojections import PlotThread
 
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DEVICE = torch.device("cuda")
 
 def get_now():
     return datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+
+def gpu_tensor_to_np_image(t):
+    np_t = t.detach().cpu().numpy()
+    return np_t.reshape(np_t.shape[-2:])
 
 def pre_train():
     """Trains a Variational Sketch Pretrainer network."""
@@ -34,9 +41,9 @@ def pre_train():
     sketch_dir_train = "Sketches/Renders"
     sketch_dir_test = "Sketches/Renders2_Test"
 
-    batch_size_param = 400
-    learning_rate = 0.005
-    total_epochs = 10
+    batch_size_param = 256
+    learning_rate = 0.0001
+    total_epochs = 300
     use_augmentation = True
 
 
@@ -45,7 +52,7 @@ def pre_train():
     # The number of epochs between save attempts. If set to 'n', then every
     # 'n-th' epoch is a "save-epoch", where the weights are saved if certain 
     # conditions are met
-    epoch_precision = 5  
+    epoch_precision = 10  
 
     # If true, only keeps the weights of the highest performing "save-epoch"
     # along with the starting weights and final weights
@@ -68,7 +75,7 @@ def pre_train():
     train_dataset = dataset.SketchDataset(sketch_dir_train, use_augmentation, device=DEVICE)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_param, shuffle=True)
 
-    test_dataset = dataset.SketchDataset(sketch_dir_test, use_augmentation, 400, device=DEVICE)
+    test_dataset = dataset.SketchDataset(sketch_dir_test, use_augmentation, 512, device=DEVICE)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size_param, shuffle=False)
 
     # Initialize network
@@ -76,6 +83,8 @@ def pre_train():
                                           latent_dims=latent_dims,
                                           filter_size=filter_size,
                                           final_grid_size=final_grid_size,device=DEVICE)
+                                          
+    # Initialize optimizer
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
 
     # Print layers to confirm architecture
@@ -91,6 +100,9 @@ def pre_train():
     os.mkdir(model_dir_name + "/ModelWeights/")
     torch.save(network.state_dict(), model_dir_name + "/ModelWeights/StartWeights.pt")
 
+    # Create directory for saving reprojections
+    os.mkdir(model_dir_name + "/Reprojections")
+
     # Get user description of run
     run_description = input("Enter Run Description: ")
 
@@ -102,6 +114,8 @@ def pre_train():
     prev_max_saved_epoch = -1
     training_elbos = []
     test_elbos = []
+
+    run_ended_early = False
 
     save_non_optimal_weights = not only_save_highest_performance_with_endpoints and not only_save_higher_performance
 
@@ -118,10 +132,10 @@ def pre_train():
         test_img_count += batch_size
 
         # Forward propagate image batch
-        reprojections, mu, logVar = network(image_batch)
+        reprojections, z, mu, logVar = network(image_batch)
 
         # Compute batch loss
-        batch_loss = network.loss_function(image_batch, reprojections, mu, logVar)
+        batch_loss = network.bce_loss_fn(image_batch, reprojections, mu, logVar)
 
         # Add batch loss to overall epoch training loss
         starting_test_loss += batch_loss.item()
@@ -130,106 +144,126 @@ def pre_train():
     test_elbos.append(starting_test_elbo)
     print("Starting Loss:", starting_test_elbo)
 
+    fig = plt.imshow(gpu_tensor_to_np_image(reprojections[0,:]), cmap='Greys_r')
+    plt.axis('off')
+    plt.savefig(model_dir_name + '/Reprojections/PreTrain.jpg')
+
     # Get starting time for training loop
     print("Start Training!")
     start_time = time.time()
 
-    # Overall training loop
-    for epoch in range(total_epochs):
-        epoch_start_time = time.time()
+    try:
+        # Overall training loop
+        for epoch in range(total_epochs):
+            epoch_start_time = time.time()
 
-        # Initialize overall loss variable
-        overall_training_loss = 0
-        train_img_count = 0
+            # Initialize overall loss variable
+            overall_training_loss = 0
+            train_img_count = 0
 
-        # Per epoch training loop
-        for idx, image_batch in enumerate(train_dataloader):
+            # Per epoch training loop
+            for idx, image_batch in enumerate(train_dataloader):
 
-            # Get batch size (this could be less than the specified batch size
-            # if the total image count is not divisible by the batch size)
-            batch_size = image_batch.shape[0]
+                # Get batch size (this could be less than the specified batch size
+                # if the total image count is not divisible by the batch size)
+                batch_size = image_batch.shape[0]
 
-            # Add current batch size to total image count
-            train_img_count += batch_size
+                # Add current batch size to total image count
+                train_img_count += batch_size
 
-            # Reset gradient to zero
-            optimizer.zero_grad()
+                # Forward propagate image batch
+                reprojections, z, mu, logVar = network(image_batch)
 
-            # Forward propagate image batch
-            reprojections, mu, logVar = network(image_batch)
+                # Compute batch loss
+                batch_loss = network.bce_loss_fn(image_batch, reprojections, mu, logVar) 
+                total_batch_loss = batch_loss.item()
+                batch_loss = batch_loss / batch_size
 
-            # Compute batch loss
-            batch_loss = network.loss_function(image_batch, reprojections, mu, logVar)
+                # Check for invalid loss
+                if batch_loss < 0:
+                    print("IMPOSSIBLE LOSS FOUND!\n")
 
-            # Check for invalid loss
-            if batch_loss < 0:
-                print("IMPOSSIBLE LOSS FOUND!\n")
+                # Add batch loss to overall epoch training loss
+                overall_training_loss += total_batch_loss
 
-            # Add batch loss to overall epoch training loss
-            overall_training_loss += batch_loss.item()
+                # Reset gradient to zero
+                optimizer.zero_grad()
 
-            # Backpropagate loss
-            batch_loss.backward()
-            optimizer.step()
+                # Backpropagate loss
+                batch_loss.backward()
+                optimizer.step()
 
-        overall_test_loss = 0
-        test_img_count = 0
+            overall_test_loss = 0
+            test_img_count = 0
 
-        for idx, image_batch in enumerate(test_dataloader):
-            # Get batch size (this could be less than the specified batch size
-            # if the total image count is not divisible by the batch size)
-            batch_size = image_batch.shape[0]
+            for idx, image_batch in enumerate(test_dataloader):
+                # Get batch size (this could be less than the specified batch size
+                # if the total image count is not divisible by the batch size)
+                batch_size = image_batch.shape[0]
 
-            # Add current batch size to total image count
-            test_img_count += batch_size
+                # Add current batch size to total image count
+                test_img_count += batch_size
 
-            # Forward propagate image batch
-            reprojections, mu, logVar = network(image_batch)
+                # Forward propagate image batch
+                reprojections, z, mu, logVar = network(image_batch)
 
-            # Compute batch loss
-            batch_loss = network.loss_function(image_batch, reprojections, mu, logVar)
+                # Compute batch loss
+                batch_loss = network.bce_loss_fn(image_batch, reprojections, mu, logVar)
 
-            # Add batch loss to overall epoch training loss
-            overall_test_loss += batch_loss.item()
+                # Add batch loss to overall epoch training loss
+                overall_test_loss += batch_loss.item()
 
-        print("Epoch", epoch, "\n=============================")
-        print("\tDuration:", time.time() - epoch_start_time, "s")
+            print("Epoch", epoch, "\n=============================")
+            print("\tDuration:", time.time() - epoch_start_time, "s")
 
-        avg_train_elbo = -overall_training_loss / train_img_count
-        avg_test_elbo = -overall_test_loss / test_img_count
+            avg_train_elbo = -overall_training_loss / train_img_count
+            avg_test_elbo = -overall_test_loss / test_img_count
 
-        training_elbos.append(avg_train_elbo)
-        test_elbos.append(avg_test_elbo)
+            training_elbos.append(avg_train_elbo)
+            test_elbos.append(avg_test_elbo)
 
-        print("\tAverage Training Loss:", avg_train_elbo)
-        print("\tAverage Test Loss:", avg_test_elbo)
+            print("\tAverage Training Loss:", avg_train_elbo)
+            print("\tAverage Test Loss:", avg_test_elbo)
 
-        # Update max elbo variables
-        max_train_elbo = max(max_train_elbo, avg_train_elbo)
-        max_test_elbo = max(max_test_elbo, avg_test_elbo)
+            # Update max elbo variables
+            max_train_elbo = max(max_train_elbo, avg_train_elbo)
+            max_test_elbo = max(max_test_elbo, avg_test_elbo)
 
-        # Try to save the weights
-        # 
-        # First, check if this is a 'save-epoch'
-        if (epoch + 1) % epoch_precision == 0:
-            # Next, check if the test ELBO is higher than the last saved ELBO value
-            if save_non_optimal_weights or avg_test_elbo > max_saved_test_elbo:
-                # Save current model weights
-                torch.save(network.state_dict(), model_dir_name + "/ModelWeights/Epoch" + str(epoch) + ".pt")
-                
-                # Update saved epoch parameters
-                prev_max_saved_epoch = max_saved_epoch
-                max_saved_epoch = epoch
+            # Try to save the weights
+            # 
+            # First, check if this is a 'save-epoch'
+            if (epoch + 1) % epoch_precision == 0:
+                # Next, check if the test ELBO is higher than the last saved ELBO value
+                if save_non_optimal_weights or avg_test_elbo > max_saved_test_elbo:
+                    # Save current model weights
+                    torch.save(network.state_dict(), model_dir_name + "/ModelWeights/Epoch" + str(epoch) + ".pt")
+                    
+                    # Update saved epoch parameters
+                    prev_max_saved_epoch = max_saved_epoch
+                    max_saved_epoch = epoch
 
-                # Delete old weights if 'only_save_highest_performance_with_endpoints' is set to 'True'
-                if only_save_highest_performance_with_endpoints and prev_max_saved_epoch != -1:
-                    os.remove(model_dir_name + "/ModelWeights/Epoch" + str(prev_max_saved_epoch) + ".pt")
+                    # Delete old weights if 'only_save_highest_performance_with_endpoints' is set to 'True'
+                    if only_save_highest_performance_with_endpoints and prev_max_saved_epoch != -1:
+                        os.remove(model_dir_name + "/ModelWeights/Epoch" + str(prev_max_saved_epoch) + ".pt")
 
-    # Get ending time
-    finish_time = time.time()
+            fig.set_data(gpu_tensor_to_np_image(reprojections[0,:]))
+            plt.savefig(model_dir_name + '/Reprojections/Epoch_' + str(epoch) + '.jpg')
 
-    # Save final weights
-    torch.save(network.state_dict(), model_dir_name + "/ModelWeights/FinalWeights.pt")
+        # Get ending time
+        finish_time = time.time()
+
+        # Save final weights
+        torch.save(network.state_dict(), model_dir_name + "/ModelWeights/FinalWeights.pt")
+
+    except Exception as e:
+        print("Run Ended Early Due to Error!")
+        print(e)
+        run_ended_early = True
+
+    except KeyboardInterrupt as ki:
+        print("Run Ended Early Due to Error!")
+        print(e)
+        run_ended_early = True
 
     # Save network parameters
     with open(model_dir_name + 'network_parameters.pkl', 'wb') as f:
@@ -243,18 +277,21 @@ def pre_train():
     with open(model_dir_name + "RunDescription.txt", 'w') as f:
         f.write("Run Date: " + now.strftime("%m-%d-%Y") + "\n")
         f.write("Run Time: " + now.strftime("%H:%M:%S") + "\n\n")
+        if run_ended_early:
+            f.write("RUN TERMINATED EARLY!!\n\n")
         f.write("Directory: " + model_dir_name + "\n\n")
         f.write("Training Images Directory:" + sketch_dir_train + "\n")
         f.write("Number of Training Images: " + str(len(train_dataset)) + "\n\n")
         f.write("Test Images Directory:" + sketch_dir_test + "\n")
         f.write("Number of Test Images: " + str(len(test_dataset)) + "\n\n")
         f.write("Latent Dimensions: " + str(network.latent_dims) + "\n")
-        f.write("Number of epochs: " + str(total_epochs) + "\n")
+        f.write("Number of epochs: " + str(epoch + (0 if run_ended_early else 1)) + "\n")
         f.write("Batch Size: " + str(batch_size_param) + "\n")
         f.write("Learning Rate: " + str(learning_rate) + "\n")
         f.write("\nNetwork Architecture:\n")
         f.write(network.to_str() + "\n\n")
-        f.write("Computation Time: " + str(finish_time - start_time) + "\n")
+        if not run_ended_early:
+            f.write("Computation Time: " + str(finish_time - start_time) + "\n")
         f.write("Max Training ELBO: " + str(max_train_elbo) + "\n")
         f.write("Max Test ELBO: " + str(max_test_elbo) + "\n")
         f.write("Use Augmentations: " + str(use_augmentation))

@@ -4,6 +4,7 @@ import pickle
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -41,66 +42,66 @@ def check_input_validity(depth, latent_dims, img_channels, starting_filters, fil
 
 # Lightly modified from this pytorch tutorial:
 # https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
-def reparameterization(mean : torch.Tensor, sd : torch.Tensor, device : torch.device = DEFAULT_DEVICE):
-        """
-        Samples a Multivariate Gaussian Distribution (MGD) with the specified mean and variance
+def reparameterization(mean : Tensor, sd : Tensor, device : torch.device = DEFAULT_DEVICE):
+    """
+    Samples a Multivariate Gaussian Distribution (MGD) with the specified mean and variance
 
-        mean : torch.Tensor
-            The mean of the MGD to be sampled.
+    mean : torch.Tensor
+        The mean of the MGD to be sampled.
 
-        sd : torch.Tensor
-            The standard deviation of the MGD to be sampled.
+    sd : torch.Tensor
+        The standard deviation of the MGD to be sampled.
 
-        device : device
-            The device to which the result should be saved. By default, the data is saved
-            to the GPU if cuda is available, and on the CPU otherwise.
+    device : device
+        The device to which the result should be saved. By default, the data is saved
+        to the GPU if cuda is available, and on the CPU otherwise.
 
-        This reparameterization is used to enable the Variational Autoencoder to backpropogate 
-        loss to the mean/variance while still allowing for "non-deterministic" sampling of the
-        distribution.        
-        """
-        epsilon = torch.randn_like(sd).to(device)        # sampling epsilon        
-        z = mean + sd*epsilon                          # reparameterization trick
-        return z
+    This reparameterization is used to enable the Variational Autoencoder to backpropogate 
+    loss to the mean/variance while still allowing for "non-deterministic" sampling of the
+    distribution.        
+    """
+    epsilon = torch.randn_like(sd).to(device)        # sampling epsilon        
+    z = mean + sd * epsilon                          # reparameterization trick
+    return z
 
 
-def preprocess_input(input : torch.Tensor, min_img_size : int, fill_value : float = 0.0) -> torch.Tensor:
-        """
-        Pre-processes an input tensor with constant-value padding so that it can be properly 
-        processed by a network.
+def preprocess_input(input : Tensor, min_img_size : int, fill_value : float = 0.0) -> Tensor:
+    """
+    Pre-processes an input tensor with constant-value padding so that it can be properly 
+    processed by a network.
 
-        model : VariationalSketchPretrainer or SketchToSDF
-            The network for which the input will be pre-processed
+    model : VariationalSketchPretrainer or SketchToSDF
+        The network for which the input will be pre-processed
 
-        input : torch.Tensor 
-            The input image or batch of images to preprocess
+    input : torch.Tensor 
+        The input image or batch of images to preprocess
 
-        fill_value : float
-            The fill value for the padding
-        
-        If the image is smaller than the minimum image size needed for the network, it is 
-        padded up to this size. If the input image has an odd size in height/
-        width, it is padded slightly more on the bottom/right than on the top/left.
-        """
-        size = input.size()
+    fill_value : float
+        The fill value for the padding
+    
+    If the image is smaller than the minimum image size needed for the network, it is 
+    padded up to this size. If the input image has an odd size in height/
+    width, it is padded slightly more on the bottom/right than on the top/left.
+    """
+    size = input.size()
 
-        # Compute target image size
-        target_height = max(min_img_size, size[-2]) 
-        target_width = max(min_img_size, size[-1])
+    # Compute target image size
+    target_height = max(min_img_size, size[-2]) 
+    target_width = max(min_img_size, size[-1])
 
-        # Compute padding size
-        pad_height = target_height - size[-2]
-        pad_width = target_width - size[-1]
+    # Compute padding size
+    pad_height = target_height - size[-2]
+    pad_width = target_width - size[-1]
 
-        top = bottom = pad_height // 2
-        if pad_height % 2 != 0:
-            bottom += 1
+    top = bottom = pad_height // 2
+    if pad_height % 2 != 0:
+        bottom += 1
 
-        left = right = pad_width // 2
-        if pad_width % 2 != 0:
-            right += 1
+    left = right = pad_width // 2
+    if pad_width % 2 != 0:
+        right += 1
 
-        return torch.nn.functional.pad(input, pad=(left, right, top, bottom), value=fill_value)
+    return torch.nn.functional.pad(input, pad=(left, right, top, bottom), value=fill_value)
 
 def load_VSP(network_dir, weights_string="FinalWeights", device=DEFAULT_DEVICE):
     if network_dir[-1] != "/" and network_dir[-1] != "\\":
@@ -133,7 +134,7 @@ def load_VSP(network_dir, weights_string="FinalWeights", device=DEFAULT_DEVICE):
         return None 
 
 class VariationalSketchPretrainer(nn.Module):
-    def __init__(self, depth=4, latent_dims=256, img_channels=1, starting_filters=32, filter_size=3, 
+    def __init__(self, depth=4, latent_dims=256, img_channels=1, starting_filters=32, filter_size=5, 
                  final_channels : int = None, final_grid_size=16, device=torch.device('cuda')):
         """
         Parameters
@@ -179,7 +180,10 @@ class VariationalSketchPretrainer(nn.Module):
 
         # Compute minimum image size
         self.min_img_size = (2**depth) * final_grid_size
-
+        
+        # Set gaussian likelihood scale variable
+        # self.scale = nn.Parameter(torch.tensor([0.0], device=DEFAULT_DEVICE))
+        
         # Set up encoding convolutional layers
         self.convLayers = nn.ModuleList()
         channels_in = img_channels
@@ -219,7 +223,8 @@ class VariationalSketchPretrainer(nn.Module):
                                                         output_padding=(1,1), device=self.device))
             channels_in = channels_out
             channels_out = int(channels_out/2)
-    
+        
+
     def forward(self, x : torch.Tensor):
         x = preprocess_input(x, self.min_img_size, 0)
 
@@ -253,12 +258,12 @@ class VariationalSketchPretrainer(nn.Module):
         mean, log_var = torch.split(x, x.shape[-1]//2, dim=-1)
 
         # Sample the latent distribution for a latent vector
-        x = reparameterization(mean, torch.exp(0.5*log_var), self.device)
+        z = reparameterization(mean, torch.exp(0.5*log_var), self.device)
 
         # Decoder half begins here
 
         # Forward propagate
-        x = self.latentSampleToPool(x)
+        x = self.latentSampleToPool(z)
         
         # Reshape tensor to regain the last three dimensions (tensor format is now '... x C x H x W')
         x = x.reshape(decodeReshapeSize)
@@ -270,19 +275,46 @@ class VariationalSketchPretrainer(nn.Module):
         for layer in self.deconvLayers:
             x = F.relu(layer(x))
 
-        x = F.sigmoid(x)
-
         # Return the final tensor and the estimated latent distribution parameters
-        return x, mean, log_var
+        return torch.sigmoid(x), z, mean, log_var
     
     
     # Taken from this PyTorch tutorial
-    # https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
-    def loss_function(self, x, x_hat, mean, log_var):
-        reproduction_loss = nn.functional.mse_loss(x_hat, x, reduction='sum')
-        kld_loss = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+    # https://www.kaggle.com/code/maunish/training-vae-on-imagenet-pytorch
+    """
+    def kl_loss(self,z,mean,std):
+        p = torch.distributions.Normal(torch.zeros_like(mean, device=DEFAULT_DEVICE),
+                                       torch.ones_like(std, device=DEFAULT_DEVICE))
+        q = torch.distributions.Normal(mean,torch.exp(std/2))
 
-        return reproduction_loss + kld_loss
+        log_pz = p.log_prob(z)
+        log_qzx = q.log_prob(z)
+
+        kl_loss = (log_qzx - log_pz)
+        kl_loss = kl_loss.sum(-1)
+        return kl_loss
+
+    # Modified from this PyTorch tutorial
+    # https://www.kaggle.com/code/maunish/training-vae-on-imagenet-pytorch
+    def gaussian_likelihood(self, inputs : Tensor, outputs : Tensor, scale : Tensor):
+        dist = torch.distributions.Normal(outputs,torch.exp(scale))
+        log_pxz = dist.log_prob(inputs)
+        return log_pxz.sum(dim=(1,2,3))
+
+    # Modified from this PyTorch tutorial
+    # https://www.kaggle.com/code/maunish/training-vae-on-imagenet-pytorch
+    def loss_fn(self,inputs,outputs,z,mean,logVar):
+        std = torch.exp(logVar/2)
+        kl_loss = self.kl_loss(z,mean,std)
+        rec_loss = self.gaussian_likelihood(inputs,outputs,self.scale)
+
+        return torch.mean(kl_loss - rec_loss)
+    """
+
+    def bce_loss_fn(self, image_batch, reprojections, mu, logVar):
+        reconstruction_loss = nn.functional.binary_cross_entropy(reprojections, image_batch, reduction='sum')
+        kl_divergence_loss = -0.5 * torch.sum(1 + logVar - mu.pow(2) - logVar.exp())
+        return (reconstruction_loss + kl_divergence_loss)
 
     def get_network_param_dict(self):
         # Dictionary of parameters for saving/loading purposes
@@ -298,6 +330,7 @@ class VariationalSketchPretrainer(nn.Module):
 
     def to_str(self):
         s = ""
+        
         for layer in self.convLayers:
             s += str(layer) + "\n"
 
@@ -316,6 +349,7 @@ class VariationalSketchPretrainer(nn.Module):
             s += str(layer) + "\n"
 
         return s
+        
 
     def print_layers(self):
         print("Convolution Block:\n============================")
@@ -339,6 +373,7 @@ class VariationalSketchPretrainer(nn.Module):
         print("Deconvolution Block:\n============================")
         for layer in self.deconvLayers:
             print(layer)
+        
 
 
 class SketchToSDF(nn.Module):

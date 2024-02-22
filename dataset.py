@@ -98,7 +98,7 @@ class SketchDataset(data.Dataset):
         
         img_name = os.path.join(self.root_dir, self.names[index])
 
-        image = self.transform(Image.open(img_name)).to(self.device)
+        image = self.transform(Image.open(img_name).convert('RGB')).to(self.device)
 
         return image
     
