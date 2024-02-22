@@ -13,7 +13,6 @@ from matplotlib import pyplot as plt
 
 import dataset as dataset
 from MegaNet.network import SketchToSDF, VariationalSketchPretrainer
-from plotReprojections import PlotThread
 
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DEVICE = torch.device("cuda")
@@ -43,7 +42,7 @@ def pre_train():
 
     batch_size_param = 256
     learning_rate = 0.0001
-    total_epochs = 300
+    total_epochs = 20
     use_augmentation = True
 
 
@@ -67,6 +66,12 @@ def pre_train():
     now = datetime.datetime.now()
     run_timestamp = get_now()
     
+    if not os.path.isdir("Models/"):
+        os.mkdir("Models/")
+
+    if not os.path.isdir("Models/CVAE"):
+        os.mkdir("Models/CVAE")
+
     # Set up output path/folder
     model_dir_name = "Models/CVAE/" + run_timestamp + "/"
     os.mkdir(model_dir_name)
@@ -262,7 +267,6 @@ def pre_train():
 
     except KeyboardInterrupt as ki:
         print("Run Ended Early Due to Error!")
-        print(e)
         run_ended_early = True
 
     # Save network parameters
