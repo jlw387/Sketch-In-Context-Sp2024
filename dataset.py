@@ -2,11 +2,13 @@ import os
 import random
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 import torch
 import torchvision.transforms as transforms
 import torch.utils.data as data
+import tqdm
  
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -101,4 +103,95 @@ class SketchDataset(data.Dataset):
         image = self.transform(Image.open(img_name).convert('RGB')).to(self.device)
 
         return image
+    
+
+
+
+class SketchPointDataset(data.Dataset):
+    """Simple class for storing a sketch dataset."""
+
+    def __init__(self, root_dir : str, train_split: int, device = DEFAULT_DEVICE):
+        """
+        Arguments:
+            
+            root_dir (string): 
+
+
+        """
+
+        """
+        Parameters
+        -----------
+        root_dir : str
+            Directory with all the images (must be in png format).
+        size_override : int
+            If not None, restricts the dataset to the first 'size_override' entries.
+            if there are fewer than 'size_override' images in the provided directory, 
+            all images are used. If 'size_override' is negative, it is ignored.
+        device : device
+            The device onto which the dataset should be loaded. By default, the dataset is 
+            stored on the GPU if cuda is available, and on the CPU otherwise.
+        """
+
+        if root_dir.endswith('/') or root_dir.endswith('\\'):
+            root_dir = root_dir[:-1]
+            
+        self.root_dir = root_dir
+        self.train_split = train_split
+        self.device = device
+        self.transform = transforms.Compose([transforms.ToTensor(), transforms.Grayscale(1)])
+
+        self.count = 0
+        self.names = []
+        print("Searching " + self.root_dir + " for files...")
+        for path in os.scandir(self.root_dir):
+            # print(path)
+            filestring = path.path[len(self.root_dir) + 1:]
+            # print(filestring)
+            self.count += 1
+            self.names.append(filestring)
+        # print(self.names)
+
+    def __len__(self):
+        return self.count
+        
+    def __getitem__(self, index):
+
+        num_points = 10000
+
+        if torch.is_tensor(index):
+            index = index.tolist()[0]
+        
+        folder_path = os.path.join(self.root_dir, self.names[index])
+
+        # print(folder_path)
+        img_path = folder_path + "\sketch.png"
+        image = self.transform(Image.open(img_path).convert('RGB')).to(self.device)
+
+        points_path = folder_path + "\sample_points_fixed.csv"
+        points_frame = pd.read_csv(points_path, header=None)
+
+        surface_start = (points_frame.index[(points_frame == "Surface Points").any(axis=1)]).array[0]
+        random_start = (points_frame.index[(points_frame == "Random Points").any(axis=1)]).array[0]
+
+        surface_start = (points_frame.index[(points_frame == "Surface Points").any(axis=1)]).array[0]
+        random_start = (points_frame.index[(points_frame == "Random Points").any(axis=1)]).array[0]
+
+        grid_frame = points_frame.iloc[1:surface_start,:]
+        surface_frame = points_frame.iloc[surface_start + 1:random_start,:]
+        random_frame = points_frame.iloc[random_start + 1:,:]  
+
+        # surface_subset = surface_frame.sample(n=4000, replace=False)
+
+        points = torch.Tensor(pd.concat([grid_frame, surface_frame, random_frame]).astype('float64').values)
+        points = points[0:num_points]
+
+
+        # print(type(image))
+        # print(type(points))
+
+        return image, points
+
+
+
     

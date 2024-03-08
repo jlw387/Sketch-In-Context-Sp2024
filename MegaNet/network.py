@@ -272,8 +272,10 @@ class VariationalSketchPretrainer(nn.Module):
         # x = torch.nn.functional.max_unpool2d(x, indices, stride=unPoolStride, kernel_size=unPoolKernelSize, padding=0, output_size=unPoolDims)
 
         # Forward propagate
-        for layer in self.deconvLayers:
+        for layer in self.deconvLayers[:-1]:
             x = F.relu(layer(x))
+
+        x = self.deconvLayers[-1](x)
 
         # Return the final tensor and the estimated latent distribution parameters
         return torch.sigmoid(x), z, mean, log_var
@@ -440,9 +442,135 @@ class SketchToSDF(nn.Module):
 
         # Set up latent space conversion
         self.poolToLatentDistibution = nn.Linear(final_grid_size * final_grid_size * channels_out, latent_dims*2, device=device)
+
+        # # Set up sdf convolutional layers
+        self.sdfLayers = nn.ModuleList()
+
+        self.fc1 = nn.Linear(latent_dims+3, 1024, device=device)
+        self.sdfLayers.append(self.fc1)
+        self.fc2 = nn.Linear(1024, 512, device=device)
+        self.sdfLayers.append(self.fc2)
+        self.fc3 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc3)
+        self.fc_4 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc_4)   # add residual in training
+        self.fc_5 = nn.Linear(512+latent_dims+3, 1024, device=device)
+        self.sdfLayers.append(self.fc_5)
+        self.fc_6 = nn.Linear(1024, 512, device=device)
+        self.sdfLayers.append(self.fc_6)
+        self.fc_7 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc_7)
+        self.fc_8 = nn.Linear(512, 1, device=device)
+        self.sdfLayers.append(self.fc_8)
     
-    def forward(self, x):
-        return
+    def forward(self, x, coord):
+        x = preprocess_input(x, self.min_img_size, 0)
+
+        # Compute pooling size ratios for later
+        # poolRatioV = x.size()[-1] // self.min_img_size
+        # poolRatioH = x.size()[-2] // self.min_img_size
+
+        # Forward propagate
+        for layer in self.convLayers:
+            x = F.relu(layer(x))
+    
+        # Compute unpooling parameters for later
+        # unPoolDims = x.size()
+        # unPoolStride = (poolRatioV, poolRatioH)
+        # unPoolKernelSize = (unPoolDims[-2] - (self.final_grid_size-1) * poolRatioV, 
+        #                     unPoolDims[-1] - (self.final_grid_size-1) * poolRatioH) 
+
+        # Apply max pooling to reduce dimensionality to a known fixed size
+        # x, indices = torch.nn.functional.adaptive_max_pool2d_with_indices(x, (self.final_grid_size, self.final_grid_size), True)
+
+        # Save current tensor size for reshaping later
+        # decodeReshapeSize = x.size()
+
+        # Flatten the tensor in the last three dimensions to use with the linear layer
+        x = x.flatten(start_dim=-3)
+
+        # Forward propagate to get the latent distribution parameters
+        x = self.poolToLatentDistibution(x)
+
+        # Split the result into the mean and log variance
+        mean, log_var = torch.split(x, x.shape[-1]//2, dim=-1)
+
+        # Sample the latent distribution for a latent vector
+        z = reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
+        z = torch.cat((z, coord.to(self.device)), 1)   # coord: 256*3
+
+        # sdf half begins here
+
+        # Forward propagate
+        for layer in range(len(self.sdfLayers[:-1])):
+            # print(layer)
+            if layer == 0:
+                # print(coord.to(self.device).expand(256, 3).shape)
+                # print(z.shape)
+                # print(self.sdfLayers[layer](torch.cat((z, coord.to(self.device).expand(256, 3)), 1)))
+                x = F.relu(self.sdfLayers[layer](z))   #coord has to have shape 1*3 to be broadcastable
+                # print(x.shape)
+            elif layer == 3:
+                # print(x.shape)
+                # print(torch.cat((x, z), 1).shape)
+                # print(self.sdfLayers[layer](x).shape)
+                x = F.relu(torch.cat((self.sdfLayers[layer](x), z), 1))  #residual, not added yet 
+            else:
+                x = F.relu(self.sdfLayers[layer](x))
+
+        x = self.sdfLayers[-1](x)
+
+        # Return the final tensor and the estimated latent distribution parameters
+        return torch.sigmoid(x), z, mean, log_var
+    
+    
+    # Lightly modified from this pytorch tutorial:
+# https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
+    def reparameterization(mean : Tensor, sd : Tensor, device : torch.device = DEFAULT_DEVICE):
+        """
+        Samples a Multivariate Gaussian Distribution (MGD) with the specified mean and variance
+
+        mean : torch.Tensor
+            The mean of the MGD to be sampled.
+
+        sd : torch.Tensor
+            The standard deviation of the MGD to be sampled.
+
+        device : device
+            The device to which the result should be saved. By default, the data is saved
+            to the GPU if cuda is available, and on the CPU otherwise.
+
+        This reparameterization is used to enable the Variational Autoencoder to backpropogate 
+        loss to the mean/variance while still allowing for "non-deterministic" sampling of the
+        distribution.        
+        """
+        epsilon = torch.randn_like(sd).to(device)        # sampling epsilon        
+        z = mean + sd * epsilon                          # reparameterization trick
+        return z
+
+
+    def print_layers(self):
+        print("Convolution Block:\n============================")
+        for layer in self.convLayers:
+            print(layer)
+
+        print("\nAdaptive Pooling Layer: " + str(self.final_grid_size) + "x" \
+                                           + str(self.final_grid_size) + "x" \
+                                           + str(self.final_channels) + "\n")
+
+        print(self.poolToLatentDistibution, "\n")
+        
+        # print("Reparameterization Step\n")
+
+        # print(self.latentSampleToPool, "\n")
+        
+        # print("Unpooling Layer: " + str(self.final_grid_size) + "x" \
+        #                           + str(self.final_grid_size) + "x" \
+        #                           + str(self.final_channels) + "\n")
+
+        print("SDF Block:\n============================")
+        for layer in self.sdfLayers:
+            print(layer)
 
 
 
