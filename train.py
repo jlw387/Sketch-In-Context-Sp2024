@@ -607,8 +607,8 @@ if __name__ == "__main__":
     sketch_dir_train = "Sketches/Renders"
     sketch_dir_test = "Sketches/Renders2_Test"
     data_dir = r"C:\Users\LabUser\Documents\SketchToModel\SDFDataset\Gen_1661051586"
-    sketch_points_dir_train = "SDFDatasets/Gen_1709917339/Train"    #need change
-    sketch_points_dir_test = "SDFDatasets/Gen_1709917339/Test"   #need change
+    sketch_points_dir_train = "SDFDataset_in_progress/Train/Gen_1709917339"    #need change
+    sketch_points_dir_test = "SDFDatasets_in_progress/Test/Gen_1709917339"   #need change
 
     batch_size_param = 256
     learning_rate = 0.0001
