@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from einops.layers.torch import Reduce
+
 DEFAULT_DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Requires i >= 0
@@ -133,6 +135,37 @@ def load_VSP(network_dir, weights_string="FinalWeights", device=DEFAULT_DEVICE):
         print(e)
         return None 
 
+
+def load_S2SDF(network_dir, weights_string="FinalWeights", device=DEFAULT_DEVICE):
+    if network_dir[-1] != "/" and network_dir[-1] != "\\":
+        network_dir += "/"
+    try:
+        with open(network_dir + "network_parameters.pkl", 'rb') as f:
+            loaded_dict = pickle.load(f)
+            network = SketchToSDF(depth=loaded_dict["depth"], 
+                                    latent_dims=loaded_dict["latent_dims"],
+                                    img_channels=loaded_dict["img_channels"],
+                                    starting_filters=loaded_dict["starting_filters"],
+                                    filter_size=loaded_dict["filter_size"],
+                                    final_channels=loaded_dict["final_channels"],
+                                    final_grid_size=loaded_dict["final_grid_size"],
+                                    device=device)
+    
+    except Exception as e:
+        print("Failed to load network parameters at \'" + network_dir + "\'")
+        print(e)
+        return None
+    
+    weights_path = network_dir + "ModelWeights/" + weights_string + ".pt"
+
+    try:
+        network.load_state_dict(torch.load(weights_path))
+        return network
+    except Exception as e:
+        print("Failed to load network weights at \'" + weights_path + "\'")
+        print(e)
+        return None 
+
 class VariationalSketchPretrainer(nn.Module):
     def __init__(self, depth=4, latent_dims=256, img_channels=1, starting_filters=32, filter_size=5, 
                  final_channels : int = None, final_grid_size=16, device=torch.device('cuda')):
@@ -223,7 +256,6 @@ class VariationalSketchPretrainer(nn.Module):
                                                         output_padding=(1,1), device=self.device))
             channels_in = channels_out
             channels_out = int(channels_out/2)
-        
 
     def forward(self, x : torch.Tensor):
         x = preprocess_input(x, self.min_img_size, 0)
@@ -379,8 +411,8 @@ class VariationalSketchPretrainer(nn.Module):
 
 
 class SketchToSDF(nn.Module):
-    def __init__(self, depth=4, latent_dims=256, img_channels=1, starting_filters=32, 
-                 filter_size=3, final_channels:int = None, final_grid_size=16, device=DEFAULT_DEVICE):
+    def __init__(self, depth=4, latent_dims=1024, img_channels=1, starting_filters=32, 
+                 filter_size=3, final_channels:int = None, final_grid_size=16, loss:str=None, device=DEFAULT_DEVICE):
         """
         Parameters
         -----------
@@ -419,6 +451,7 @@ class SketchToSDF(nn.Module):
         self.final_channels = final_channels
         self.final_grid_size = final_grid_size
         self.filter_size = filter_size
+        self.loss = loss
         self.device = device
 
         # Compute minimum image size
@@ -463,7 +496,22 @@ class SketchToSDF(nn.Module):
         self.fc_8 = nn.Linear(512, 1, device=device)
         self.sdfLayers.append(self.fc_8)
     
-    def forward(self, x, coord):
+    def load_weights(self, weights_path):
+        pretrained_weights = torch.load(weights_path) 
+        for key in pretrained_weights.keys():
+            if key in self.state_dict().keys():
+                # print(key)
+                # print(pretrained_weights[key].shape)
+                # print(self.state_dict()[key].shape)
+                self.state_dict()[key].copy_(pretrained_weights[key])
+
+    def set_encoder_frozen(self, is_frozen : bool):
+        for layer in self.convLayers:
+            layer.requires_grad_(not is_frozen)
+        
+        self.poolToLatentDistibution.requires_grad_(not is_frozen)
+
+    def forward_encoder_section(self, x):
         x = preprocess_input(x, self.min_img_size, 0)
 
         # Compute pooling size ratios for later
@@ -472,7 +520,8 @@ class SketchToSDF(nn.Module):
 
         # Forward propagate
         for layer in self.convLayers:
-            x = F.relu(layer(x))
+            x = layer(x)
+            F.relu(x, inplace=True)
     
         # Compute unpooling parameters for later
         # unPoolDims = x.size()
@@ -496,10 +545,15 @@ class SketchToSDF(nn.Module):
         mean, log_var = torch.split(x, x.shape[-1]//2, dim=-1)
 
         # Sample the latent distribution for a latent vector
-        z = reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
-        z = torch.cat((z, coord.to(self.device)), 1)   # coord: 256*3
+        return reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
 
-        # sdf half begins here
+
+    def forward_sdf_section(self, z, coord):
+        coord_flat = coord.view(-1, 3)
+        z = z.view(-1, self.latent_dims)
+        z = z.repeat(coord_flat.shape[0] // z.shape[0], 1)
+
+        z = torch.cat((z, coord_flat.to(self.device)), dim=-1)   # coord: 256*3
 
         # Forward propagate
         for layer in range(len(self.sdfLayers[:-1])):
@@ -508,24 +562,50 @@ class SketchToSDF(nn.Module):
                 # print(coord.to(self.device).expand(256, 3).shape)
                 # print(z.shape)
                 # print(self.sdfLayers[layer](torch.cat((z, coord.to(self.device).expand(256, 3)), 1)))
-                x = F.relu(self.sdfLayers[layer](z))   #coord has to have shape 1*3 to be broadcastable
+                x = self.sdfLayers[layer](z)   #coord has to have shape 1*3 to be broadcastable
+                F.relu(x, inplace=True)
                 # print(x.shape)
             elif layer == 3:
                 # print(x.shape)
-                # print(torch.cat((x, z), 1).shape)
-                # print(self.sdfLayers[layer](x).shape)
-                x = F.relu(torch.cat((self.sdfLayers[layer](x), z), 1))  #residual, not added yet 
+                # print(z.shape)
+                # print(torch.cat((self.sdfLayers[layer](x), z), 2).shape)
+                x = self.sdfLayers[layer](x)
+                F.relu(x, inplace=True)
+                x = torch.cat((x, z), 1)  #residual, not added yet 
+                
             else:
-                x = F.relu(self.sdfLayers[layer](x))
+                x = self.sdfLayers[layer](x)
+                F.relu(x, inplace=True)
 
         x = self.sdfLayers[-1](x)
 
-        # Return the final tensor and the estimated latent distribution parameters
-        return torch.sigmoid(x), z, mean, log_var
+        # Return the final tensor
+        return x.view(coord.shape[:-1])
+
+    def forward(self, x, coord):
+        
+        z = self.forward_encoder_section(x)
+
+        return self.forward_sdf_section(z, coord)
+
+        
     
+    def mse_tanh_loss_fn(self, preds : torch.Tensor, labels : torch.Tensor):
+        return torch.nn.functional.mse_loss(torch.tanh(preds.flatten()), torch.tanh(labels.flatten()), reduction='sum')
+
+    def bce_sigmoid_loss_fn(self, preds : torch.Tensor, labels : torch.Tensor):
+        return torch.nn.functional.binary_cross_entropy_with_logits(preds.flatten(), labels.flatten(), reduction='sum')
+    
+    def compute_loss(self, preds, labels):
+        if self.loss == 'mse_tanh':
+            return self.mse_tanh_loss_fn(preds, labels)
+        elif self.loss == 'bce_sigmoid':
+            return self.bce_sigmoid_loss_fn(preds, labels)
+        else:
+            return self.mse_tanh_loss_fn(preds, labels)
     
     # Lightly modified from this pytorch tutorial:
-# https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
+    # https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
     def reparameterization(mean : Tensor, sd : Tensor, device : torch.device = DEFAULT_DEVICE):
         """
         Samples a Multivariate Gaussian Distribution (MGD) with the specified mean and variance
@@ -548,6 +628,43 @@ class SketchToSDF(nn.Module):
         z = mean + sd * epsilon                          # reparameterization trick
         return z
 
+    def get_network_param_dict(self):
+        # Dictionary of parameters for saving/loading purposes
+        return {
+            "depth":self.depth,
+            "latent_dims":self.latent_dims,
+            "img_channels": self.img_channels,
+            "starting_filters":self.starting_filters,
+            "filter_size":self.filter_size,
+            "final_channels":self.final_channels,
+            "final_grid_size":self.final_grid_size
+        }
+
+    def to_str(self):
+        s = ""
+        
+        for layer in self.convLayers:
+            s += str(layer) + "\n"
+
+        s += "PoolToSize " + str(self.final_grid_size) + "x" + \
+                             str(self.final_grid_size) + "x" + \
+                             str(self.final_channels) + "\n"
+        
+        s += str(self.poolToLatentDistibution) + "\n"
+        s += str("Reparameterization Step\n")
+        
+        for layer in self.sdfLayers:
+            s += str(layer) + "\n"
+            
+        return s
+    
+    def get_loss_name(self):
+        if self.loss == "mse_tanh":
+            return "Mean Squared Tanh Error"
+        elif self.loss == "bce_sigmoid":
+            return "Binary Cross Entropy + Sigmoid"
+        else:
+            return "Mean Squared Tanh Error"
 
     def print_layers(self):
         print("Convolution Block:\n============================")
@@ -575,4 +692,288 @@ class SketchToSDF(nn.Module):
 
 
 
+class SketchToSDFHybrid(nn.Module):
+    def __init__(self, depth=2, latent_dims=1024, img_channels=1, starting_filters=32, 
+                 filter_size=5, final_channels:int = 1024, final_spatial_channels = 4, 
+                 final_grid_size=16, loss:str=None, device=DEFAULT_DEVICE):
+        """
+        Parameters
+        -----------
+        depth : int
+            The number of convolutional layers of the network (defaults to 4).
+        latent_dims : int
+            The number of dimensions of the latent space created from 
+            the result of the convolutional block (defaults to 256).
+        img_channels : int 
+            The number of channels of the input image (defaults to 1).
+        starting_filters : int
+            The number of filters for the first convolutional layer (defaults to 32).
+            All subsequent convolutional layers double this number (unless final_channels
+            is specified, see below)
+        filter_size : int
+            The size of the kernel for each filter (defaults to 3).
+        final_channels : int
+            The number of channels for the final convolutional layer, 
+            if set to None, the number of channels is twice that of
+            the previous layer (defaults to None).
+        final_grid_size : int
+            The size of the grid used for max_pooling after the final convolutional layer.
+            Must be a power of 2.
+        """
+        super(SketchToSDF, self).__init__()
+
+
+        check_input_validity(depth, latent_dims, img_channels, starting_filters, filter_size, 
+                             final_channels, final_grid_size)
+
+        # Set instance variables
+        self.depth = depth
+        self.latent_dims = latent_dims
+        self.img_channels = img_channels
+        self.starting_filters = starting_filters
+        self.final_channels = final_channels
+        self.final_spatial_channels = final_spatial_channels
+        self.final_grid_size = final_grid_size
+        self.filter_size = filter_size
+        self.loss = loss
+        self.device = device
+
+        # Compute minimum image size
+        self.min_img_size = (2**depth) * final_grid_size
+
+        # Set up encoding convolutional layers
+        self.convLayers = nn.ModuleList()
+        channels_in = img_channels
+        channels_out = starting_filters
+        for layer in range(depth):
+            if layer == depth - 1 and final_channels is not None:
+                channels_out = final_channels
+            self.convLayers.append(nn.Conv2d(in_channels=channels_in, 
+                                             out_channels=channels_out, 
+                                             kernel_size=filter_size, 
+                                             stride=(2,2), padding=(1,1), 
+                                             device=device))
+            if layer != depth - 1:
+                channels_in = channels_out
+                channels_out *= 2
+
+        self.maxPoolByChannel = Reduce('b c h w -> b c 1 1', 'max')
+
+        # Set up latent space conversion
+        self.poolToLatentDistibution = nn.Linear(channels_out + final_grid_size * final_grid_size * final_spatial_channels, latent_dims*2, device=device)
+
+        # # Set up sdf convolutional layers
+        self.sdfLayers = nn.ModuleList()
+
+        self.fc1 = nn.Linear(latent_dims+3, 1024, device=device)
+        self.sdfLayers.append(self.fc1)
+        self.fc2 = nn.Linear(1024, 512, device=device)
+        self.sdfLayers.append(self.fc2)
+        self.fc3 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc3)
+        self.fc_4 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc_4)   # add residual in training
+        self.fc_5 = nn.Linear(512+latent_dims+3, 1024, device=device)
+        self.sdfLayers.append(self.fc_5)
+        self.fc_6 = nn.Linear(1024, 512, device=device)
+        self.sdfLayers.append(self.fc_6)
+        self.fc_7 = nn.Linear(512, 512, device=device)
+        self.sdfLayers.append(self.fc_7)
+        self.fc_8 = nn.Linear(512, 1, device=device)
+        self.sdfLayers.append(self.fc_8)
+    
+    def load_weights(self, weights_path):
+        pretrained_weights = torch.load(weights_path) 
+        for key in pretrained_weights.keys():
+            if key in self.state_dict().keys():
+                # print(key)
+                # print(pretrained_weights[key].shape)
+                # print(self.state_dict()[key].shape)
+                self.state_dict()[key].copy_(pretrained_weights[key])
+
+    def set_encoder_frozen(self, is_frozen : bool):
+        for layer in self.convLayers:
+            layer.requires_grad_(not is_frozen)
         
+        self.poolToLatentDistibution.requires_grad_(not is_frozen)
+
+    def forward_encoder_section(self, x):
+        x = preprocess_input(x, self.min_img_size, 0)
+
+        # Compute pooling size ratios for later
+        # poolRatioV = x.size()[-1] // self.min_img_size
+        # poolRatioH = x.size()[-2] // self.min_img_size
+
+        # Forward propagate
+        for layer in self.convLayers:
+            x = layer(x)
+            F.relu(x, inplace=True)
+    
+        # Compute unpooling parameters for later
+        # unPoolDims = x.size()
+        # unPoolStride = (poolRatioV, poolRatioH)
+        # unPoolKernelSize = (unPoolDims[-2] - (self.final_grid_size-1) * poolRatioV, 
+        #                     unPoolDims[-1] - (self.final_grid_size-1) * poolRatioH) 
+
+        # Apply max pooling to reduce dimensionality to a known fixed size
+        # x, indices = torch.nn.functional.adaptive_max_pool2d_with_indices(x, (self.final_grid_size, self.final_grid_size), True)
+
+        # Save current tensor size for reshaping later
+        # decodeReshapeSize = x.size()
+
+        # Pool channels
+        x_pool = self.maxPoolByChannel(x)
+
+        # Flatten the tensor in the last three dimensions to use with the linear layer
+        x_spatial_info = x[:,:self.final_spatial_channels,:].flatten(start_dim=-3)
+
+        # Forward propagate to get the latent distribution parameters
+        x = self.poolToLatentDistibution(x)
+
+        # Split the result into the mean and log variance
+        mean, log_var = torch.split(x, x.shape[-1]//2, dim=-1)
+
+        # Sample the latent distribution for a latent vector
+        return reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
+
+
+    def forward_sdf_section(self, z, coord):
+        coord_flat = coord.view(-1, 3)
+        z = z.view(-1, self.latent_dims)
+        z = z.repeat(coord_flat.shape[0] // z.shape[0], 1)
+
+        z = torch.cat((z, coord_flat.to(self.device)), dim=-1)   # coord: 256*3
+
+        # Forward propagate
+        for layer in range(len(self.sdfLayers[:-1])):
+            # print(layer)
+            if layer == 0:
+                # print(coord.to(self.device).expand(256, 3).shape)
+                # print(z.shape)
+                # print(self.sdfLayers[layer](torch.cat((z, coord.to(self.device).expand(256, 3)), 1)))
+                x = self.sdfLayers[layer](z)   #coord has to have shape 1*3 to be broadcastable
+                F.relu(x, inplace=True)
+                # print(x.shape)
+            elif layer == 3:
+                # print(x.shape)
+                # print(z.shape)
+                # print(torch.cat((self.sdfLayers[layer](x), z), 2).shape)
+                x = self.sdfLayers[layer](x)
+                F.relu(x, inplace=True)
+                x = torch.cat((x, z), 1)  #residual, not added yet 
+                
+            else:
+                x = self.sdfLayers[layer](x)
+                F.relu(x, inplace=True)
+
+        x = self.sdfLayers[-1](x)
+
+        # Return the final tensor
+        return x.view(coord.shape[:-1])
+
+    def forward(self, x, coord):
+        
+        z = self.forward_encoder_section(x)
+
+        return self.forward_sdf_section(z, coord)
+
+        
+    
+    def mse_tanh_loss_fn(self, preds : torch.Tensor, labels : torch.Tensor):
+        return torch.nn.functional.mse_loss(torch.tanh(preds.flatten()), torch.tanh(labels.flatten()), reduction='sum')
+
+    def bce_sigmoid_loss_fn(self, preds : torch.Tensor, labels : torch.Tensor):
+        return torch.nn.functional.binary_cross_entropy_with_logits(preds.flatten(), labels.flatten(), reduction='sum')
+    
+    def compute_loss(self, preds, labels):
+        if self.loss == 'mse_tanh':
+            return self.mse_tanh_loss_fn(preds, labels)
+        elif self.loss == 'bce_sigmoid':
+            return self.bce_sigmoid_loss_fn(preds, labels)
+        else:
+            return self.mse_tanh_loss_fn(preds, labels)
+    
+    # Lightly modified from this pytorch tutorial:
+    # https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/tree/master
+    def reparameterization(mean : Tensor, sd : Tensor, device : torch.device = DEFAULT_DEVICE):
+        """
+        Samples a Multivariate Gaussian Distribution (MGD) with the specified mean and variance
+
+        mean : torch.Tensor
+            The mean of the MGD to be sampled.
+
+        sd : torch.Tensor
+            The standard deviation of the MGD to be sampled.
+
+        device : device
+            The device to which the result should be saved. By default, the data is saved
+            to the GPU if cuda is available, and on the CPU otherwise.
+
+        This reparameterization is used to enable the Variational Autoencoder to backpropogate 
+        loss to the mean/variance while still allowing for "non-deterministic" sampling of the
+        distribution.        
+        """
+        epsilon = torch.randn_like(sd).to(device)        # sampling epsilon        
+        z = mean + sd * epsilon                          # reparameterization trick
+        return z
+
+    def get_network_param_dict(self):
+        # Dictionary of parameters for saving/loading purposes
+        return {
+            "depth":self.depth,
+            "latent_dims":self.latent_dims,
+            "img_channels": self.img_channels,
+            "starting_filters":self.starting_filters,
+            "filter_size":self.filter_size,
+            "final_channels":self.final_channels,
+            "final_grid_size":self.final_grid_size
+        }
+
+    def to_str(self):
+        s = ""
+        
+        for layer in self.convLayers:
+            s += str(layer) + "\n"
+
+        s += "PoolToSize " + str(self.final_grid_size) + "x" + \
+                             str(self.final_grid_size) + "x" + \
+                             str(self.final_channels) + "\n"
+        
+        s += str(self.poolToLatentDistibution) + "\n"
+        s += str("Reparameterization Step\n")
+        
+        for layer in self.sdfLayers:
+            s += str(layer) + "\n"
+            
+        return s
+    
+    def get_loss_name(self):
+        if self.loss == "mse_tanh":
+            return "Mean Squared Tanh Error"
+        elif self.loss == "bce_sigmoid":
+            return "Binary Cross Entropy + Sigmoid"
+        else:
+            return "Mean Squared Tanh Error"
+
+    def print_layers(self):
+        print("Convolution Block:\n============================")
+        for layer in self.convLayers:
+            print(layer)
+
+        print("\nAdaptive Pooling Layer: " + str(self.final_grid_size) + "x" \
+                                           + str(self.final_grid_size) + "x" \
+                                           + str(self.final_channels) + "\n")
+
+        print(self.poolToLatentDistibution, "\n")
+        
+        # print("Reparameterization Step\n")
+
+        # print(self.latentSampleToPool, "\n")
+        
+        # print("Unpooling Layer: " + str(self.final_grid_size) + "x" \
+        #                           + str(self.final_grid_size) + "x" \
+        #                           + str(self.final_channels) + "\n")
+
+        print("SDF Block:\n============================")
+        for layer in self.sdfLayers:
+            print(layer)      
