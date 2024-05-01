@@ -409,7 +409,6 @@ class VariationalSketchPretrainer(nn.Module):
             print(layer)
         
 
-
 class SketchToSDF(nn.Module):
     def __init__(self, depth=4, latent_dims=1024, img_channels=1, starting_filters=32, 
                  filter_size=3, final_channels:int = None, final_grid_size=16, loss:str=None, device=DEFAULT_DEVICE):
@@ -548,10 +547,12 @@ class SketchToSDF(nn.Module):
         return reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
 
 
-    def forward_sdf_section(self, z, coord):
+    def forward_sdf_section(self, z, coord, training=True):
         coord_flat = coord.view(-1, 3)
         z = z.view(-1, self.latent_dims)
         z = z.repeat(coord_flat.shape[0] // z.shape[0], 1)
+        print(z.shape)
+        print(coord.shape)
 
         z = torch.cat((z, coord_flat.to(self.device)), dim=-1)   # coord: 256*3
 
@@ -582,11 +583,11 @@ class SketchToSDF(nn.Module):
         # Return the final tensor
         return x.view(coord.shape[:-1])
 
-    def forward(self, x, coord):
+    def forward(self, x, coord, training=True):
         
         z = self.forward_encoder_section(x)
 
-        return self.forward_sdf_section(z, coord)
+        return self.forward_sdf_section(z, coord, training)
 
         
     
@@ -690,12 +691,11 @@ class SketchToSDF(nn.Module):
             print(layer)
 
 
-
-
 class SketchToSDFHybrid(nn.Module):
-    def __init__(self, depth=2, latent_dims=1024, img_channels=1, starting_filters=32, 
-                 filter_size=5, final_channels:int = 1024, final_spatial_channels = 4, 
-                 final_grid_size=16, loss:str=None, device=DEFAULT_DEVICE):
+    def __init__(self, depth=4, latent_dims=512, img_channels=1, starting_filters=32, 
+                 filter_size=5, final_channels:int=None, final_spatial_channels = 1, 
+                 final_grid_size=16, pooling_filter_padding = 4, loss:str=None, 
+                 device=DEFAULT_DEVICE):
         """
         Parameters
         -----------
@@ -720,7 +720,7 @@ class SketchToSDFHybrid(nn.Module):
             The size of the grid used for max_pooling after the final convolutional layer.
             Must be a power of 2.
         """
-        super(SketchToSDF, self).__init__()
+        super(SketchToSDFHybrid, self).__init__()
 
 
         check_input_validity(depth, latent_dims, img_channels, starting_filters, filter_size, 
@@ -751,21 +751,31 @@ class SketchToSDFHybrid(nn.Module):
             self.convLayers.append(nn.Conv2d(in_channels=channels_in, 
                                              out_channels=channels_out, 
                                              kernel_size=filter_size, 
-                                             stride=(2,2), padding=(1,1), 
+                                             stride=(2,2), padding=(filter_size//2,filter_size//2), 
                                              device=device))
             if layer != depth - 1:
                 channels_in = channels_out
                 channels_out *= 2
 
-        self.maxPoolByChannel = Reduce('b c h w -> b c 1 1', 'max')
 
         # Set up latent space conversion
-        self.poolToLatentDistibution = nn.Linear(channels_out + final_grid_size * final_grid_size * final_spatial_channels, latent_dims*2, device=device)
+        self.poolToLatentDistibution = nn.Conv2d(in_channels=channels_out, 
+                                                out_channels=latent_dims*2, 
+                                                kernel_size=final_grid_size, 
+                                                stride=1, 
+                                                padding=pooling_filter_padding, 
+                                                device=device)
+        
+        self.maxPoolPerChannel = Reduce('b c h w -> b c', 'max')
+
+        # Set up spatial data preservation
+        #self.spatial_data_size = final_grid_size * final_grid_size * final_spatial_channels
+        self.spatial_data_size = 0
 
         # # Set up sdf convolutional layers
         self.sdfLayers = nn.ModuleList()
 
-        self.fc1 = nn.Linear(latent_dims+3, 1024, device=device)
+        self.fc1 = nn.Linear(latent_dims+self.spatial_data_size+3, 1024, device=device)
         self.sdfLayers.append(self.fc1)
         self.fc2 = nn.Linear(1024, 512, device=device)
         self.sdfLayers.append(self.fc2)
@@ -773,7 +783,7 @@ class SketchToSDFHybrid(nn.Module):
         self.sdfLayers.append(self.fc3)
         self.fc_4 = nn.Linear(512, 512, device=device)
         self.sdfLayers.append(self.fc_4)   # add residual in training
-        self.fc_5 = nn.Linear(512+latent_dims+3, 1024, device=device)
+        self.fc_5 = nn.Linear(512+latent_dims+self.spatial_data_size+3, 1024, device=device)
         self.sdfLayers.append(self.fc_5)
         self.fc_6 = nn.Linear(1024, 512, device=device)
         self.sdfLayers.append(self.fc_6)
@@ -821,28 +831,44 @@ class SketchToSDFHybrid(nn.Module):
         # Save current tensor size for reshaping later
         # decodeReshapeSize = x.size()
 
-        # Pool channels
-        x_pool = self.maxPoolByChannel(x)
+        # Latent Dimension Conv2DLayer (Large Filter Size)
+        x_pool = self.poolToLatentDistibution(x)
 
-        # Flatten the tensor in the last three dimensions to use with the linear layer
-        x_spatial_info = x[:,:self.final_spatial_channels,:].flatten(start_dim=-3)
+        # Max Pool Across Channels 
+        shape = x_pool.size() # Format should be 'b1 b2 ... c h w'
 
-        # Forward propagate to get the latent distribution parameters
-        x = self.poolToLatentDistibution(x)
+        total_batch_size = torch.prod(torch.tensor(shape[:-3])) # b = b1 * b2 * ...
+        x_pool = x_pool.reshape((total_batch_size, shape[-3], shape[-2], shape[-1])) # Format should be 'b c h w'
+        
+        x_pool = self.maxPoolPerChannel(x_pool) # Format should be 'b c'
+        x_pool = x_pool.reshape(shape[:-2]) # Format should be 'b1 b2 ... c'
 
         # Split the result into the mean and log variance
-        mean, log_var = torch.split(x, x.shape[-1]//2, dim=-1)
+        mean, log_var = torch.split(x_pool, x_pool.shape[-1]//2, dim=-1)
+
+        # Flatten the tensor in the last three dimensions to use with the linear layer
+        # x_spatial_info = x[..., :self.final_spatial_channels, :, :].flatten(start_dim=-3) # format should be 'b1 b2 ... d'
 
         # Sample the latent distribution for a latent vector
-        return reparameterization(mean, torch.exp(0.5*log_var), self.device)   #256*1024
+        return reparameterization(mean, torch.exp(0.5*log_var), self.device) #, x_spatial_info  
+    
 
+    def forward_sdf_section(self, z, x_spatial_info, coord, training=True):
+        coord_flat = coord.view(torch.prod(torch.tensor(coord.size()[:-1])), 3)
+        
+        # Flatten z and spatial_info tensors
+        z = z.view(torch.prod(torch.tensor(z.size()[:-1])), self.latent_dims)
+        #x_spatial_info = x_spatial_info.view(torch.prod(torch.tensor(x_spatial_info.size()[:-1])), 
+                                             #self.spatial_data_size)
 
-    def forward_sdf_section(self, z, coord):
-        coord_flat = coord.view(-1, 3)
-        z = z.view(-1, self.latent_dims)
+        # Concatenate z and spatial_info tensors
+        #z = torch.cat((z, x_spatial_info), dim=-1)
+
+        # Repeat z if needed (used in the case of large batches of coordinates for the same sketch)
         z = z.repeat(coord_flat.shape[0] // z.shape[0], 1)
 
-        z = torch.cat((z, coord_flat.to(self.device)), dim=-1)   # coord: 256*3
+        # Concatenate z and coordinate tensors
+        z = torch.cat((z, coord.to(self.device)), dim=-1)   # coord: 256*3
 
         # Forward propagate
         for layer in range(len(self.sdfLayers[:-1])):
@@ -852,6 +878,7 @@ class SketchToSDFHybrid(nn.Module):
                 # print(z.shape)
                 # print(self.sdfLayers[layer](torch.cat((z, coord.to(self.device).expand(256, 3)), 1)))
                 x = self.sdfLayers[layer](z)   #coord has to have shape 1*3 to be broadcastable
+                F.dropout(x, 0.1, training, True)
                 F.relu(x, inplace=True)
                 # print(x.shape)
             elif layer == 3:
@@ -859,11 +886,13 @@ class SketchToSDFHybrid(nn.Module):
                 # print(z.shape)
                 # print(torch.cat((self.sdfLayers[layer](x), z), 2).shape)
                 x = self.sdfLayers[layer](x)
+                F.dropout(x, 0.1, training, True)
                 F.relu(x, inplace=True)
                 x = torch.cat((x, z), 1)  #residual, not added yet 
                 
             else:
                 x = self.sdfLayers[layer](x)
+                F.dropout(x, 0.1, training, True)
                 F.relu(x, inplace=True)
 
         x = self.sdfLayers[-1](x)
@@ -871,12 +900,12 @@ class SketchToSDFHybrid(nn.Module):
         # Return the final tensor
         return x.view(coord.shape[:-1])
 
-    def forward(self, x, coord):
+    def forward(self, x, coord, training=True):
         
+        #z, spatial_info = self.forward_encoder_section(x)
         z = self.forward_encoder_section(x)
 
-        return self.forward_sdf_section(z, coord)
-
+        return self.forward_sdf_section(z, None, coord, training)
         
     
     def mse_tanh_loss_fn(self, preds : torch.Tensor, labels : torch.Tensor):
@@ -930,17 +959,28 @@ class SketchToSDFHybrid(nn.Module):
         }
 
     def to_str(self):
-        s = ""
+        s = "Hybrid Network\n----------------------\n"
         
         for layer in self.convLayers:
             s += str(layer) + "\n"
 
-        s += "PoolToSize " + str(self.final_grid_size) + "x" + \
+
+        if self.final_channels == None:
+            final_channels = self.starting_filters * (2 ** (self.depth - 1)) 
+        else:
+            final_channels = self.final_channels
+
+        s += "LargeConv2d: Kernel=" +  \
                              str(self.final_grid_size) + "x" + \
-                             str(self.final_channels) + "\n"
+                             str(self.final_grid_size) + "x" + \
+                             str(final_channels) + \
+                            "  Filters=" + str(self.latent_dims * 2) + "\n"
         
-        s += str(self.poolToLatentDistibution) + "\n"
-        s += str("Reparameterization Step\n")
+        s += "Spatial Info: " + str(self.final_grid_size) + "x" + \
+                                str(self.final_grid_size) + "x" + \
+                                str(self.final_spatial_channels) + "\n"
+        
+        s += "Reparameterization Step\n"
         
         for layer in self.sdfLayers:
             s += str(layer) + "\n"
@@ -960,9 +1000,20 @@ class SketchToSDFHybrid(nn.Module):
         for layer in self.convLayers:
             print(layer)
 
-        print("\nAdaptive Pooling Layer: " + str(self.final_grid_size) + "x" \
-                                           + str(self.final_grid_size) + "x" \
-                                           + str(self.final_channels) + "\n")
+        if self.final_channels == None:
+            final_channels = self.starting_filters * (2 ** (self.depth-1)) 
+        else:
+            final_channels = self.final_channels
+
+        print("LargeConv2d: Kernel=" +  \
+                             str(self.final_grid_size) + "x" + \
+                             str(self.final_grid_size) + "x" + \
+                             str(final_channels) + \
+                            "  Filters=" + str(self.latent_dims * 2))
+        
+        print("Spatial Info: " + str(self.final_grid_size) + "x" + \
+                                str(self.final_grid_size) + "x" + \
+                                str(self.final_spatial_channels), "\n")
 
         print(self.poolToLatentDistibution, "\n")
         

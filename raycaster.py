@@ -266,11 +266,11 @@ object_color = np.array([128,112,255])
 background_color = np.array([64,0,0])
 timeout_color = np.array([0,64,0])
 
-sketch_path = "./SDFDatasets/Gen_1712888438_Test/Model_14000/sketch.png"
+sketch_path = "./SDFDatasets/Gen_1712888438_Train/Model_0/sketch.png"
 # network_timestamp = "2024_03_29_11_48_29"
 #network_timestamp = "2022_08_16_11_17_16"
 # network_timestamp = "2022_09_05_00_39_54"
-network_timestamp = "2024_04_12_10_45_04"
+network_timestamp = "2024_03_26_03_58_24"
 
 model = load_S2SDF(network_dir="Models/SDF/" + network_timestamp, weights_string="FinalWeights")
 

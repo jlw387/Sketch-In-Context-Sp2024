@@ -4,7 +4,7 @@ import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 from PIL import Image
 
-dir_str = "Ablations/CVAE/"
+dir_str = "GridSearches/CVAE/"
 
 run_folders = os.listdir(dir_str)
 

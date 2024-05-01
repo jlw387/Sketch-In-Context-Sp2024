@@ -44,16 +44,34 @@ model_type = "SDF"
 #     "2024_03_26_06_16_54"]
 # ]
 
+# runs = [
+#     ["2024_03_25_18_43_51",
+#     "2024_03_25_19_01_26",
+#     "2024_03_25_19_19_04"],
+#     ["2024_03_25_22_13_32",
+#     "2024_03_25_22_47_57",
+#     "2024_03_25_23_22_24"],
+#     ["2024_03_26_03_23_55",
+#     "2024_03_26_03_58_24",
+#     "2024_03_26_04_32_55"]
+# ]
+
 runs = [
-    ["2024_03_25_18_43_51",
-    "2024_03_25_19_01_26",
-    "2024_03_25_19_19_04"],
-    ["2024_03_25_22_13_32",
-    "2024_03_25_22_47_57",
-    "2024_03_25_23_22_24"],
-    ["2024_03_26_03_23_55",
-    "2024_03_26_03_58_24",
-    "2024_03_26_04_32_55"]
+    ["2024_04_24_22_24_41", 
+    "2024_04_24_22_50_43",
+    "2024_04_24_23_16_34"],
+    ["2024_04_24_23_42_14", 
+    "2024_04_25_00_08_59",
+    "2024_04_25_00_35_44"],
+    ["2024_04_25_01_02_30",
+    "2024_04_25_01_31_33",
+    "2024_04_25_02_00_36"],
+    ["2024_04_25_02_29_39",
+    "2024_04_25_03_03_14",
+    "2024_04_25_03_36_53"],
+    ["2024_04_25_04_10_31",
+    "2024_04_25_04_48_38",
+    "2024_04_25_05_26_45"]
 ]
 
 plt.xlabel("Epoch")
@@ -62,7 +80,7 @@ plt.ylabel("ELBO" if model_type == "CVAE" else "Mean Squared Tanh Error")
 train_txt_label = "TrainingElbos.txt" if model_type == "CVAE" else "TrainingLosses.txt"
 test_txt_label = "TestElbos.txt" if model_type == "CVAE" else "TestLosses.txt"
 
-types = ["Frozen", "Unfrozen", "Scratch"]
+types = ["128", "256", "512", "1024", "1536"]
 
 lr_count = 0
 for lr in runs:
@@ -84,8 +102,12 @@ for lr in runs:
     average_training_losses = total_training_losses / run_count
     average_test_losses = total_test_losses / run_count
 
-    plt.plot(average_training_losses, label=types[lr_count] + "_Train")
-    plt.plot(average_test_losses, label=types[lr_count] + "_Test")
+    print("Latent_Dims_" + types[lr_count] + " Min Loss:", np.min(average_test_losses))
+    print("Latent_Dims_" + types[lr_count] + " Final Loss:", average_test_losses[-1])
+    print("")
+
+    plt.plot(average_training_losses, label="Latent_Dims_" + types[lr_count] + "_Train")
+    plt.plot(average_test_losses, label="Latent_Dims_" + types[lr_count] + "_Test")
 
     lr_count += 1
 

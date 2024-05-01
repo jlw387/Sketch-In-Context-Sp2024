@@ -13,7 +13,7 @@ from torch.cuda.amp import autocast, GradScaler
 from matplotlib import pyplot as plt
 
 import dataset as dataset
-from MegaNet.network import SketchToSDF, VariationalSketchPretrainer
+from MegaNet.network import SketchToSDF, SketchToSDFHybrid, VariationalSketchPretrainer
 
 # DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DEVICE = torch.device("cuda")
@@ -342,7 +342,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
     run_timestamp = get_now()
     
     # Load training and test datasets
-    train_dataset = dataset.SketchPointDataset(sketch_points_dir_train, 13500, num_points=9500, device=DEVICE)
+    train_dataset = dataset.SketchPointDataset(sketch_points_dir_train, 13500, num_points=9500, use_jitter=True, device=DEVICE)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_param, shuffle=True)
 
     test_dataset = dataset.SketchPointDataset(sketch_points_dir_test, 1500, num_points=9500, device=DEVICE)
@@ -372,7 +372,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
     os.mkdir(model_dir_name)
 
     # Initialize network
-    network = SketchToSDF(depth=network_depth, 
+    network = SketchToSDFHybrid(depth=network_depth, 
                             latent_dims=latent_dims,
                             filter_size=filter_size,
                             final_grid_size=final_grid_size,device=DEVICE)
@@ -453,7 +453,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
                 train_img_count += batch_size
 
                 # Forward propagate image batch
-                preds = network(image_batch, points_batch)
+                preds = network(image_batch, points_batch, training=False)
 
                 # Compute batch loss
                 batch_loss = network.compute_loss(preds, sds_batch)
@@ -476,7 +476,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
                 test_img_count += batch_size
 
                 # Forward propagate image batch
-                preds = network(image_batch, points_batch)
+                preds = network(image_batch, points_batch, training=False)
 
                 # Compute batch loss
                 batch_loss = network.compute_loss(preds, sds_batch)
@@ -515,7 +515,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
                         train_img_count += batch_size
 
                         # Forward propagate image batch
-                        preds = network(image_batch, points_batch)
+                        preds = network(image_batch, points_batch, training=True)
 
                         # Compute batch loss
                         batch_loss = network.compute_loss(preds, sds_batch)
@@ -550,7 +550,7 @@ def train(network_depth, latent_dims, filter_size, final_grid_size, sketch_point
                         test_img_count += batch_size
 
                         # Forward propagate image batch
-                        preds = network(image_batch, points_batch)
+                        preds = network(image_batch, points_batch, training=False)
 
                         # Compute batch loss
                         batch_loss = network.compute_loss(preds, sds_batch)
@@ -655,8 +655,8 @@ if __name__ == "__main__":
     # NETWORK PARAMETERS
 
     network_depth = 4
-    latent_dims = 1024
-    filter_size = 3
+    latent_dims = 32
+    filter_size = 5
     final_grid_size = 16
 
     
@@ -680,7 +680,7 @@ if __name__ == "__main__":
 
     weight_time_stamp = "2024_02_27_17_58_34"
 
-    # run_description = "Train from scratch with single convolutional layer (Cube Dataset)."
+    run_description = "Train using hybrid network WITHOUT SPATIAL INFO. Jitter Input Images By At Most 6 Pixels."
 
     # count = 0
     # for learning_rate in [0.000025, 0.00005, 0.000075]:
@@ -694,7 +694,7 @@ if __name__ == "__main__":
 
     # pre_train(network_depth, latent_dims, filter_size, final_grid_size, sketch_dir_train, sketch_dir_test, batch_size_param, learning_rate, total_epochs, run_description)
 
-    # train(network_depth, latent_dims, filter_size, final_grid_size, sketch_points_dir_train, sketch_points_dir_test, weight_time_stamp, batch_size_param, learning_rate, total_epochs, False, False, run_description)
+    train(network_depth, latent_dims, filter_size, final_grid_size, sketch_points_dir_train, sketch_points_dir_test, weight_time_stamp, batch_size_param, learning_rate, total_epochs, False, False, run_description)
 
     # count = 0
     # for load_weight, frozen in [(True, True), (True, False),(False, False)]:
@@ -704,9 +704,9 @@ if __name__ == "__main__":
     #                 train(network_depth, latent_dims, filter_size, final_grid_size, sketch_points_dir_train, sketch_points_dir_test, weight_time_stamp, batch_size_param, learning_rate, total_epochs, load_weight, frozen, run_description)
     #             count += 1
 
-    count = 0
-    for latent_dims in [128, 256, 512, 1024, 1536]:
-        for i in range(3):
-            run_description = f"{i+1}th run in the {latent_dims} latent dim group"
-            train(network_depth, latent_dims, filter_size, final_grid_size, sketch_points_dir_train, sketch_points_dir_test, weight_time_stamp, batch_size_param, learning_rate, total_epochs, False, False, run_description)
-        count += 1
+    # count = 0
+    # for latent_dims in [128, 256, 512, 1024, 1536]:
+    #     for i in range(3):
+    #         run_description = f"{i+1}th run in the {latent_dims} latent dim group"
+    #         train(network_depth, latent_dims, filter_size, final_grid_size, sketch_points_dir_train, sketch_points_dir_test, weight_time_stamp, batch_size_param, learning_rate, total_epochs, False, False, run_description)
+    #     count += 1

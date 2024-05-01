@@ -43,16 +43,46 @@ scratch_runs = [
 #     "2024_04_12_10_45_04"
 # ]
 
-lr_5e5_runs = [
-    "2024_03_26_03_23_55", 
-    "2024_03_26_03_58_24",
-    "2024_03_26_04_32_55", 
-    "2024_03_25_23_22_24",
-    "2024_03_25_22_47_57",
-    "2024_03_25_22_13_32",
-    "2024_03_25_18_43_51",
-    "2024_03_25_19_01_26",
-    "2024_03_25_19_19_04"
+# lr_5e5_runs = [
+#     "2024_03_26_03_23_55", 
+#     "2024_03_26_03_58_24",
+#     "2024_03_26_04_32_55", 
+#     "2024_03_25_23_22_24",
+#     "2024_03_25_22_47_57",
+#     "2024_03_25_22_13_32",
+#     "2024_03_25_18_43_51",
+#     "2024_03_25_19_01_26",
+#     "2024_03_25_19_19_04"
+# ]
+
+# latent_128_runs = [
+#     "2024_04_24_22_24_41", 
+#     "2024_04_24_22_50_43",
+#     "2024_04_24_23_16_34"
+# ]
+
+# latent_256_runs = [
+#     "2024_04_24_23_42_14", 
+#     "2024_04_25_00_08_59",
+#     "2024_04_25_00_35_44"
+# ]
+
+# latent_512_runs = [
+#     "2024_04_25_01_02_30",
+#     "2024_04_25_01_31_33",
+#     "2024_04_25_02_00_36"
+# ]
+
+# latent_1024_runs = [
+#     "2024_04_25_02_29_39",
+#     "2024_04_25_03_03_14",
+#     "2024_04_25_03_36_53"
+# ]
+
+latent_1536_runs = [
+    "2024_04_25_04_10_31",
+    "2024_04_25_04_48_38",
+    "2024_04_25_05_26_45"
 ]
 
 plt.xlabel("Epoch")
@@ -61,7 +91,7 @@ plt.ylabel("ELBO" if model_type == "CVAE" else "Mean Squared Tanh Error")
 train_txt_label = "TrainingElbos.txt" if model_type == "CVAE" else "TrainingLosses.txt"
 test_txt_label = "TestElbos.txt" if model_type == "CVAE" else "TestLosses.txt"
 
-for r in lr_5e5_runs:
+for r in latent_1536_runs:
     try:
         training_losses = np.loadtxt("./Models/" + model_type + "/" + r + "/" + train_txt_label)
     except Exception as e:
@@ -84,7 +114,7 @@ if model_type == "SDF":
     plt.plot(zeros_baseline, '--', label="Baseline - Zeros")
     # plt.plot(neg_ones_baseline, '--', label="Baseline - Negative Ones")
 
-plt.title("SDF Trained from single cube LR =5e-5")
+plt.title("SDF 1536 Latent Dimensions")
 plt.legend()
 plt.show()
 

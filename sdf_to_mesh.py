@@ -17,10 +17,26 @@ from torch.utils.data import DataLoader
 DEVICE = torch.device("cuda")
 
 # test_number = 0
+def pad_to_square(image):
+    """
+    Pad the input PIL image to form a square based on the longest edge.
+
+    Args:
+        image (PIL.Image): Input image.
+
+    Returns:
+        PIL.Image: Padded image.
+    """
+    width, height = image.size
+    max_size = max(width, height)
+    pad_width = (max_size - width) // 2
+    pad_height = (max_size - height) // 2
+    padding = (pad_width, pad_height, pad_width, pad_height)
+    return transforms.functional.pad(image, padding, fill=255)
 
 def sdf_to_mesh(img_path, export_path):
-    # weight_number = "2024_04_12_10_45_04"
-    weight_number = "2024_03_26_03_58_24"
+    weight_number = "2024_04_12_10_45_04"
+    # weight_number = "2024_03_26_03_58_24"
     network_depth = 4
     filter_size = 3
     final_grid_size = 16
@@ -129,12 +145,19 @@ def sdf_to_mesh(img_path, export_path):
 
     # test = test_dataset[test_number*9500][0]
     # Open an image file
-    image = Image.open(img_path)
-    transform = transforms.ToTensor()
-    tensor_image = transform(image).cuda()
+
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Grayscale(1), transforms.Resize((256, 256))])
+    tensor_image = transform(pad_to_square(Image.open(img_path).convert('RGB'))).cuda()
+
+    to_pil = transforms.ToPILImage()
+    image = to_pil(tensor_image)
+    image.save("see.png")
     
     img_tensor = tensor_image.unsqueeze(1)
     print(type(img_tensor))
+    print(img_tensor.shape)
+    # img_tensor = test.unsqueeze(1)
+    # print(img_tensor.shape)
  
 
     x_grid, y_grid, z_grid = torch.meshgrid(torch.arange(grid_size + 1), torch.arange(grid_size + 1), torch.arange(grid_size + 1))
@@ -146,6 +169,8 @@ def sdf_to_mesh(img_path, export_path):
         z = network.forward_encoder_section(img_tensor)
 
     with torch.no_grad():
+        # print(z.shape)
+        # print(torch.Tensor(point_tensor).shape)
         result = network.forward_sdf_section(z, torch.Tensor(point_tensor)).cpu().unsqueeze(-1).numpy()
 
     evals = np.reshape(result,(grid_size+1, grid_size+1, grid_size+1))

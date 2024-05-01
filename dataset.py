@@ -43,7 +43,29 @@ class RandomTranslate(object):
         image = np.roll(image_arr, random.randint(-maxShiftPixelsH, maxShiftPixelsH), axis=1)
         image = np.roll(image_arr, random.randint(-maxShiftPixelsV, maxShiftPixelsV), axis=0)
 
-        return Image.fromarray(image_arr)    
+        return Image.fromarray(image_arr)  
+
+class RandomPixelTranslate(object):
+    """Randomly translate the image in a sample (uses wraparound)."""
+
+    def __init__(self, maxHShift : int, maxVShift : int):
+        """
+        Args:
+            maxHShift (int): Maximum horizontal shift (as a number of pixels). 
+            maxVShift (int): Maximum vertical shift (as a number of pixels).
+        """
+
+        self.maxHShift = maxHShift
+        self.maxVShift = maxVShift
+
+    def __call__(self, image):
+
+        image_arr = np.array(image)
+
+        image = np.roll(image_arr, random.randint(-self.maxHShift, self.maxHShift), axis=1)
+        image = np.roll(image_arr, random.randint(-self.maxVShift, self.maxVShift), axis=0)
+
+        return Image.fromarray(image_arr)  
 
 class SketchDataset(data.Dataset):
     """Simple class for storing a sketch dataset."""
@@ -138,7 +160,8 @@ class SketchDataset(data.Dataset):
 class SketchPointDataset(data.Dataset):
     """Simple class for storing a sketch dataset."""
 
-    def __init__(self, root_dir : str, size_override : int = None, num_points = 10000, device = DEFAULT_DEVICE):
+    def __init__(self, root_dir : str, size_override : int = None, num_points = 10000, 
+                 use_jitter = False, device = DEFAULT_DEVICE):
         """
         Parameters
         -----------
@@ -159,6 +182,7 @@ class SketchPointDataset(data.Dataset):
         self.root_dir = root_dir
         self.device = device
         self.size_override = size_override
+        self.use_jitter = use_jitter
         self.transform = transforms.Compose([transforms.ToTensor(), transforms.Grayscale(1)])
 
         pickled_data_path = root_dir + "/" + "stored_data.pkl"
@@ -251,7 +275,12 @@ class SketchPointDataset(data.Dataset):
         # print(index)
         # print(self.image_indices.shape)
         # print(self.image_indices[index])
-        return self.images[self.image_indices[index]], self.points[index], self.sds[index]
+        if not self.use_jitter:
+            return self.images[self.image_indices[index]], self.points[index], self.sds[index]
+        else:
+            img = self.images[self.image_indices[index]]
+            img = torch.roll(img, random.randint(-6,6), dims=1)
+            return torch.roll(img, random.randint(-6,6), dims=0), self.points[index], self.sds[index]
 
 
 
